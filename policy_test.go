@@ -7,10 +7,11 @@ import (
 	"github.com/cloudwego/hertz/pkg/common/config"
 	"github.com/cloudwego/hertz/pkg/common/test/assert"
 	"github.com/cloudwego/hertz/pkg/common/ut"
-	"github.com/cloudwego/hertz/pkg/network/standard"
 	"github.com/cloudwego/hertz/pkg/protocol"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 	"github.com/cloudwego/hertz/pkg/route"
+	"io"
+	"io/ioutil"
 	"net/http"
 	"testing"
 	"time"
@@ -219,21 +220,16 @@ func TestBasicSSLWithHost(t *testing.T) {
 }
 
 func TestBadProxySSL(t *testing.T) {
-	h := server.New(server.WithHostPorts("127.0.0.1:8000"))
-	h.Use(New(Config{SSLRedirect: true}))
-	h.GET("/foo", func(_ context.Context, c *app.RequestContext) {
-		c.String(200, testResponse)
+	var req protocol.Request
+	req.Header.Add("X-Forwarded-Proto", "https")
+	engine := newServer(Config{SSLRedirect: true})
+	w := ut.PerformRequest(engine, "GET", "http://www.example.com/foo", nil, ut.Header{
+		Key:   "X-Forwarded-Proto",
+		Value: "https",
 	})
-	go h.Spin()
-	time.Sleep(200 * time.Millisecond)
-	client := http.Client{}
-	req1, _ := http.NewRequest(consts.MethodGet, "http://127.0.0.1:8000/foo", nil)
-	req1.Host = "www.example.com"
-	req1.URL.Scheme = "http"
-	req1.Header.Add("X-Forwarded-Proto", "https")
-	resp, _ := client.Do(req1)
-	assert.DeepEqual(t, http.StatusMovedPermanently, resp.StatusCode)
-	assert.DeepEqual(t, "https://www.example.com/foo", resp.Header.Get("Location"))
+	resp := w.Result()
+	assert.DeepEqual(t, http.StatusMovedPermanently, resp.StatusCode())
+	assert.DeepEqual(t, "https://www.example.com/foo", w.Header().Get("Location"))
 }
 
 func TestProxySSLWithHeaderOption(t *testing.T) {
@@ -257,37 +253,16 @@ func TestProxySSLWithHeaderOption(t *testing.T) {
 }
 
 func TestProxySSLWithWrongHeaderValue(t *testing.T) {
-	h := server.New(
-		server.WithHostPorts("127.0.0.1:8002"),
-		server.WithTransport(standard.NewTransporter),
-	)
-	h.Use(New(Config{
+	engine := newServer(Config{
 		SSLRedirect:     true,
 		SSLProxyHeaders: map[string]string{"X-Arbitrary-Header": "arbitrary-value"},
-	}))
-	h.GET("/foo", func(_ context.Context, c *app.RequestContext) {
-		c.String(200, testResponse)
 	})
-	go h.Spin()
-	time.Sleep(200 * time.Millisecond)
-	client := http.Client{}
-	req, _ := http.NewRequest(consts.MethodGet, "http://127.0.0.1:8002/foo", nil)
-	req.Host = "www.example.com"
-	req.URL.Scheme = "http"
-	req.Header.Add("X-Arbitrary-Header", "wrong-value")
-	resp, _ := client.Do(req)
-	//c, _ := client.NewClient()
-	//var req *protocol.Request
-	//var resp *protocol.Response
-	//
-	//req.SetHost("www.example.com")
-	//req.SetMethod("GET")
-	//req.SetRequestURI("http://127.0.0.1:8000/foo")
-	//req.URI().SetScheme("http")
-	//req.SetIsTLS(false)
-	//req.Header.Add("X-Arbitrary-Header", "wrong-value")
-	//c.Do(context.Background(), req, resp)
-	assert.DeepEqual(t, http.StatusMovedPermanently, resp.StatusCode)
+
+	resp := performRequest(engine, "http://www.example.com/foo", ut.Header{
+		Key:   "X-Arbitrary-Header",
+		Value: "wrong-value",
+	})
+	assert.DeepEqual(t, http.StatusMovedPermanently, resp.StatusCode())
 	assert.DeepEqual(t, "https://www.example.com/foo", resp.Header.Get("Location"))
 }
 
@@ -435,6 +410,46 @@ func TestIsIpv4Host(t *testing.T) {
 	assert.DeepEqual(t, isIPV4("example.com:8080"), false)
 }
 
-func performRequest(engine *route.Engine, url string) *protocol.Response {
+func performRequest(engine *route.Engine, url string, header ...ut.Header) *protocol.Response {
 	return ut.PerformRequest(engine, consts.MethodGet, url, nil).Result()
+}
+
+func performRequest1(engine *route.Engine, method, url string, body *ut.Body, r *protocol.Request,
+	headers ...ut.Header) *ut.ResponseRecorder {
+	ctx := engine.NewContext()
+
+	if body != nil && body.Body != nil {
+		r = protocol.NewRequest(method, url, body.Body)
+		r.CopyTo(&ctx.Request)
+		if engine.IsStreamRequestBody() || body.Len == -1 {
+			ctx.Request.SetBodyStream(body.Body, body.Len)
+		} else {
+			buf, err := ioutil.ReadAll(&io.LimitedReader{R: body.Body, N: int64(body.Len)})
+			ctx.Request.SetBody(buf)
+			if err != nil && err != io.EOF {
+				panic(err)
+			}
+		}
+	} else {
+		r = protocol.NewRequest(method, url, nil)
+		r.CopyTo(&ctx.Request)
+	}
+	for _, v := range headers {
+		if ctx.Request.Header.Get(v.Key) != "" {
+			ctx.Request.Header.Add(v.Key, v.Value)
+		} else {
+			ctx.Request.Header.Set(v.Key, v.Value)
+		}
+	}
+
+	engine.ServeHTTP(context.Background(), ctx)
+
+	w := ut.NewRecorder()
+	h := w.Header()
+	ctx.Response.Header.CopyTo(h)
+
+	w.WriteHeader(ctx.Response.StatusCode())
+	w.Write(ctx.Response.Body())
+	w.Flush()
+	return w
 }

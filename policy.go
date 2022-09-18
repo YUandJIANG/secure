@@ -131,7 +131,7 @@ func isIPV4(host string) bool {
 	}
 	return net.ParseIP(host) != nil
 }
-func (p *policy) checkSSL(ctx context.Context, c *app.RequestContext) bool {
+func (p *policy) checkSSL(_ context.Context, c *app.RequestContext) bool {
 	if !p.config.SSLRedirect {
 		return true
 	}
@@ -143,12 +143,12 @@ func (p *policy) checkSSL(ctx context.Context, c *app.RequestContext) bool {
 		return true
 	}
 
-	url := req.URI()
-	url.SetScheme("https")
-	url.SetHost(string(req.Host()))
+	uri := req.URI()
+	uri.SetScheme("https")
+	uri.SetHost(string(req.Host()))
 
 	if len(p.config.SSLHost) > 0 {
-		url.SetHost(p.config.SSLHost)
+		uri.SetHost(p.config.SSLHost)
 	}
 
 	status := http.StatusMovedPermanently
@@ -156,14 +156,15 @@ func (p *policy) checkSSL(ctx context.Context, c *app.RequestContext) bool {
 	if p.config.SSLTemporaryRedirect {
 		status = http.StatusTemporaryRedirect
 	}
-	s := url.String()
-	c.Redirect(status, []byte(s))
+	c.Redirect(status, []byte(uri.String()))
 	c.Abort()
 	return false
 }
 
 func (p *policy) isSSLRequest(req *protocol.Request) bool {
-	if strings.EqualFold(string(req.URI().Scheme()), "https") {
+	scheme := req.URI().Scheme()
+	fold := strings.EqualFold(string(scheme), "https")
+	if fold {
 		return true
 	}
 	for h, v := range p.config.SSLProxyHeaders {
